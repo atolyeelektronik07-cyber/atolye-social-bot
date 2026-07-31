@@ -1,11 +1,4 @@
-"""Instagram Graph API ile içerik paylaşımı.
-
-Instagram iki adımlı çalışır:
-  1. Medya konteyneri oluştur (görselin herkese açık bir URL'de olması şart)
-  2. Konteyneri yayınla
-
-Video/Reels için konteynerin işlenmesi zaman aldığından durum sorgulanır.
-"""
+"""Instagram Graph API ile içerik paylaşımı."""
 
 from __future__ import annotations
 
@@ -39,27 +32,48 @@ def _get(path: str, params: dict) -> dict:
 
 
 def _wait_until_ready(creation_id: str, timeout_seconds: int = 300) -> None:
-    """Video konteyneri hazır olana kadar bekler."""
     deadline = time.time() + timeout_seconds
+    last: dict = {}
     while time.time() < deadline:
-        status = _get(creation_id, {"fields": "status_code,status"})
-        code = status.get("status_code")
+        try:
+            last = _get(creation_id, {"fields": "status_code,status"})
+        except InstagramError:
+            time.sleep(5)
+            continue
+
+        code = last.get("status_code")
         if code == "FINISHED":
             return
         if code == "ERROR":
-            raise InstagramError(f"Medya işlenemedi: {status.get('status')}")
+            raise InstagramError(f"Medya islenemedi: {last.get('status')}")
         time.sleep(5)
-    raise InstagramError("Medya işleme zaman aşımına uğradı.")
+
+    raise InstagramError(f"Medya isleme zaman asimina ugradi: {last}")
+
+
+def _publish_container(creation_id: str) -> str:
+    last_error: Exception | None = None
+    for _ in range(6):
+        try:
+            published = _post(
+                f"{config.IG_USER_ID}/media_publish", {"creation_id": creation_id}
+            )
+            return published["id"]
+        except InstagramError as exc:
+            message = str(exc).lower()
+            if "not available" not in message and "not ready" not in message:
+                raise
+            last_error = exc
+            print("  (medya henuz hazir degil, tekrar denenecek)")
+            time.sleep(10)
+    raise InstagramError(f"Yayinlanamadi: {last_error}")
 
 
 def publish(caption: str, media_path: str | None, is_video: bool = False) -> str:
     if not config.IG_USER_ID:
-        raise InstagramError("IG_USER_ID tanımlı değil.")
+        raise InstagramError("IG_USER_ID tanimli degil.")
     if not media_path:
-        raise InstagramError(
-            "Instagram sadece görsel/video ile paylaşıma izin veriyor; "
-            "post dosyasına 'media:' satırı ekle."
-        )
+        raise InstagramError("Instagram icin post dosyasina 'media:' satiri ekle.")
 
     url = config.media_url(media_path)
 
@@ -72,16 +86,12 @@ def publish(caption: str, media_path: str | None, is_video: bool = False) -> str
             f"{config.IG_USER_ID}/media",
             {"media_type": "REELS", "video_url": url, "caption": caption},
         )
-        creation_id = container["id"]
-        _wait_until_ready(creation_id)
     else:
         container = _post(
             f"{config.IG_USER_ID}/media",
             {"image_url": url, "caption": caption},
         )
-        creation_id = container["id"]
 
-    published = _post(
-        f"{config.IG_USER_ID}/media_publish", {"creation_id": creation_id}
-    )
-    return published["id"]
+    creation_id = container["id"]
+    _wait_until_ready(creation_id)
+    return _publish_container(creation_id)
